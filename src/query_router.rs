@@ -256,6 +256,7 @@ impl QueryRouter {
                 Some(Role::Primary) => Role::Primary.to_string(),
                 Some(Role::Replica) => Role::Replica.to_string(),
                 Some(Role::Mirror) => Role::Mirror.to_string(),
+                Some(Role::Auto) => {String::from("Auto")},
                 None => {
                     if self.query_parser_enabled() {
                         String::from("auto")

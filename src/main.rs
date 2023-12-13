@@ -82,7 +82,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create a transient runtime for loading the config for the first time.
     {
-        let runtime = Builder::new_multi_thread().worker_threads(1).build()?;
+        let runtime = Builder::new_multi_thread().enable_io().worker_threads(1).build()?;
 
         runtime.block_on(async {
             match pgcat::config::parse(args.config_file.as_str()).await {

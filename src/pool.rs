@@ -285,7 +285,7 @@ pub struct ConnectionPool {
 impl ConnectionPool {
     /// Construct the connection pool from the configuration.
     pub async fn from_config(client_server_map: ClientServerMap) -> Result<(), Error> {
-        let config = get_config();
+        let config: crate::config::Config = get_config();
 
         let mut new_pools = HashMap::new();
         let mut address_id: usize = 0;
@@ -485,7 +485,7 @@ impl ConnectionPool {
                             .queue_strategy(queue_strategy)
                             .test_on_check_out(false);
 
-                        let pool = if config.general.validate_config {
+                        let pool: Pool<ServerPool> = if config.general.validate_config {
                             pool.build(manager).await?
                         } else {
                             pool.build_unchecked(manager)
