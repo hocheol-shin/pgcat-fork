@@ -1472,7 +1472,7 @@ impl Config {
         })
     }
 
-    pub fn check_patroni_config(&mut self) -> Result<(), Error> {
+    pub fn validate_patroni_config(&mut self) -> Result<(), Error> {
         for pool in self.pools.values_mut() {
             for shard in pool.shards.values_mut() {
                 if shard.servers.iter().any(|server| server.role != Role::Auto) {
@@ -1486,7 +1486,7 @@ impl Config {
 
     // TODO
     //1. Patroni Err 만들어야함. (Err 처리가 안되어있음)
-    //2. Log 상세화 필요.
+    //2. Log 상세화 필요 info, debug 로그 설정.
     //3. 지금은 reload 할 때마다 Sync 로 http check 하여 확인 중
     pub async fn set_internal_role_for_auto(&mut self) -> Result<(), Error> {
         for (_, pool) in &mut self.pools {
@@ -1500,20 +1500,18 @@ impl Config {
                             match response.status().as_u16() {
                                 200 => {
                                     server.role = Role::Primary;
-                                    // info! ("set autorole: primary ");
                                 }
                                 503 => {
                                     server.role = Role::Replica;
-                                    // info! ("set autorole: replica");
                                 }
                                 _ => {
-                                    println!("Unsupported reply from patroni agent");
+                                    error!("Unsupported reply from patroni agent");
                                     return Err(Error::BadConfig);
                                 }
                             }
                         }
                         Err(err) => {
-                            eprintln!("Error sending OPTIONS request to Patroni Agent {} : {}", &server.host, err);
+                            error!("Error sending OPTIONS request to Patroni Agent {} : {}", &server.host, err);
                             return Err(Error::BadConfig);
                         }
                     }
@@ -1563,8 +1561,7 @@ pub async fn parse(path: &str) -> Result<(), Error> {
     };
 
     if config.check_use_patroni() {
-        // info!("check use patroni");
-        config.check_patroni_config()?;
+        config.validate_patroni_config()?;
         let _ = config.set_internal_role_for_auto().await;
     }
 
