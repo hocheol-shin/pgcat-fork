@@ -6,6 +6,8 @@ use regex::Regex;
 use serde::{Deserializer, Serializer};
 use serde_derive::{Deserialize, Serialize};
 
+use reqwest::Client;
+use reqwest::Error as reqError;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -14,8 +16,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
-use reqwest::{Client, Response};
-use reqwest::Error as reqError;
 
 use crate::dns_cache::CachedResolver;
 use crate::errors::Error;
@@ -195,7 +195,7 @@ impl Address {
             Role::Auto => format!(
                 "{}_shard_{}_auto_{}",
                 self.pool_name, self.shard, self.replica_number
-            )
+            ),
         }
     }
 
@@ -578,7 +578,6 @@ pub struct Pool {
     // Note, don't put simple fields below these configs. There's a compatibility issue with TOML that makes it
     // incompatible to have simple fields in TOML after complex objects. See
     // https://users.rust-lang.org/t/why-toml-to-string-get-error-valueaftertable/85903
-    pub use_patroni : bool, 
 }
 
 impl Pool {
@@ -740,7 +739,6 @@ impl Default for Pool {
             plugins: None,
             shards: BTreeMap::from([(String::from("1"), Shard::default())]),
             users: BTreeMap::default(),
-            use_patroni: false,
         }
     }
 }
@@ -753,15 +751,24 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
-    pub fn make_patroni_url(&self) -> String {
-        format!("http://{}:8008/primary", self.host)
+    pub fn make_patroni_url(&self, patroni_port: &Option<String>) -> String {
+        match patroni_port {
+            Some(patroni_port) => {
+                format!("http://{}:{}/primary", self.host, patroni_port)
+            }
+            None => {
+                format!("http://{}:8008/primary", self.host)
+            }
+        }
     }
 
     async fn send_options_request(&self, url: &str) -> Result<reqwest::Response, reqError> {
-        // Send an HTTP OPTIONS request to the specified URL
         // info!("send url {}", url);
-        let response = Client::new().request(reqwest::Method::OPTIONS, url).send().await?;
-    
+        let response = Client::new()
+            .request(reqwest::Method::OPTIONS, url)
+            .send()
+            .await?;
+
         Ok(response)
     }
 }
@@ -823,6 +830,8 @@ pub struct Shard {
     pub database: String,
     pub mirrors: Option<Vec<MirrorServerConfig>>,
     pub servers: Vec<ServerConfig>,
+    pub use_patroni: Option<bool>,
+    pub patroni_port: Option<String>,
 }
 
 impl Shard {
@@ -859,6 +868,18 @@ impl Shard {
             return Err(Error::BadConfig);
         }
 
+        if !self.use_patroni.is_some() {
+            for server in &self.servers {
+                if server.role == Role::Auto {
+                    error!(
+                        "Shard [{}] cannot use Auto without use_patroni feature",
+                        self.database
+                    );
+                    return Err(Error::BadConfig);
+                }
+            }
+        }
+
         Ok(())
     }
 }
@@ -873,10 +894,11 @@ impl Default for Shard {
                 port: 5432,
                 role: Role::Primary,
             }],
+            use_patroni: None.unwrap_or_default(),
+            patroni_port: None,
         }
     }
 }
-
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, Hash, Eq)]
 pub struct Plugins {
     pub intercept: Option<Intercept>,
@@ -1443,27 +1465,37 @@ impl Config {
     }
 
     pub fn check_use_patroni(&mut self) -> bool {
-        let config = &self;
-        let use_patroni = match config.pools.iter().find(|(_, pool)| pool.use_patroni) {
-            Some(_) => true,
-            None => false,
-        };
-        use_patroni
+        self.pools.values().any(|pool| {
+            pool.shards
+                .values()
+                .any(|shard| shard.use_patroni.is_some())
+        })
+    }
+
+    pub fn check_patroni_config(&mut self) -> Result<(), Error> {
+        for pool in self.pools.values_mut() {
+            for shard in pool.shards.values_mut() {
+                if shard.servers.iter().any(|server| server.role != Role::Auto) {
+                    error!("The role must be Auto in Server [{}] when using Patroni.",shard.database);
+                    return Err(Error::BadConfig);
+                }
+            }
+        }
+        Ok(())
     }
 
     // TODO
     //1. Patroni Err 만들어야함. (Err 처리가 안되어있음)
-    //2. validate 체크에 Use_patroni 관련 validation 필요함. Patroni Agent Port 도 Config 에서 받아와야함.
-    //3. 지금은 reload 할 때마다 Sync 로 http check 하여 확인하는데 이 부분 어떻게 할 것인지확인해야함. 
-    //4. 현재 최초 from_config 할 때는 Auto 타입으로 지정되고 다음 reload 할때만 수행되고 있음.  
-    pub async fn set_internal_role_for_auto(&mut self) -> Result<(), Error>{
+    //2. Log 상세화 필요.
+    //3. 지금은 reload 할 때마다 Sync 로 http check 하여 확인 중
+    pub async fn set_internal_role_for_auto(&mut self) -> Result<(), Error> {
+        for (_, pool) in &mut self.pools {
+            for (_, shard) in &mut pool.shards {
+                let patroni_port = shard.patroni_port.clone();
+                for server in &mut shard.servers {
+                    let url = server.make_patroni_url(&patroni_port);
 
-        for(_, pool) in &mut self.pools {
-            for (_, shard) in &mut pool.shards{
-                for server in &mut shard.servers{
-                    let url = server.make_patroni_url();
-
-                    match server.send_options_request(&url).await{
+                    match server.send_options_request(&url).await {
                         Ok(response) => {
                             match response.status().as_u16() {
                                 200 => {
@@ -1475,14 +1507,14 @@ impl Config {
                                     // info! ("set autorole: replica");
                                 }
                                 _ => {
-                                    println! ("Unsupported http reply from patroni agent");
-                                    return Err(Error::BadConfig)
+                                    println!("Unsupported http reply from patroni agent");
+                                    return Err(Error::BadConfig);
                                 }
                             }
                         }
                         Err(err) => {
                             eprintln!("Error sending OPTIONS request to {}: {}", &url, err);
-                            return Err(Error::BadConfig)
+                            return Err(Error::BadConfig);
                         }
                     }
                 }
@@ -1490,7 +1522,6 @@ impl Config {
         }
         Ok(())
     }
-
 }
 
 /// Get a read-only instance of the configuration
@@ -1532,7 +1563,8 @@ pub async fn parse(path: &str) -> Result<(), Error> {
     };
 
     if config.check_use_patroni() {
-        info! ("check use patroni"); 
+        // info!("check use patroni");
+        config.check_patroni_config()?;
         let _ = config.set_internal_role_for_auto().await;
     }
 
@@ -1546,7 +1578,6 @@ pub async fn parse(path: &str) -> Result<(), Error> {
 
     Ok(())
 }
-
 
 pub async fn reload_config(client_server_map: ClientServerMap) -> Result<bool, Error> {
     let old_config = get_config();
