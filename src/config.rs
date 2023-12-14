@@ -1507,13 +1507,13 @@ impl Config {
                                     // info! ("set autorole: replica");
                                 }
                                 _ => {
-                                    println!("Unsupported http reply from patroni agent");
+                                    println!("Unsupported reply from patroni agent");
                                     return Err(Error::BadConfig);
                                 }
                             }
                         }
                         Err(err) => {
-                            eprintln!("Error sending OPTIONS request to {}: {}", &url, err);
+                            eprintln!("Error sending OPTIONS request to Patroni Agent {} : {}", &server.host, err);
                             return Err(Error::BadConfig);
                         }
                     }
