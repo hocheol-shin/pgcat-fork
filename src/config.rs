@@ -766,6 +766,7 @@ impl ServerConfig {
         // info!("send url {}", url);
         let response = Client::new()
             .request(reqwest::Method::OPTIONS, url)
+            .timeout(tokio::time::Duration::from_millis(1000))
             .send()
             .await?;
 
@@ -1511,6 +1512,11 @@ impl Config {
                             }
                         }
                         Err(err) => {
+                            if err.is_timeout(){
+                                error!("HTTP OPTIONS request from Patroni agent {} timed out: {}", &server.host, err);
+                                return Err(Error::BadConfig);
+                            }
+
                             error!("Error sending OPTIONS request to Patroni Agent {} : {}", &server.host, err);
                             return Err(Error::BadConfig);
                         }
